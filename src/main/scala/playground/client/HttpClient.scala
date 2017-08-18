@@ -1,70 +1,29 @@
 package playground.client
 
-import java.lang
 import java.util.concurrent.ArrayBlockingQueue
 
 import base.LogSupport
 import io.netty.bootstrap.Bootstrap
-import io.netty.channel._
-import io.netty.channel.nio.NioEventLoopGroup
+import io.netty.buffer.ByteBuf
 import io.netty.channel.socket.SocketChannel
-import io.netty.channel.socket.nio.NioSocketChannel
+import io.netty.channel.{ChannelFuture, ChannelHandlerContext, ChannelInitializer, SimpleChannelInboundHandler}
 import io.netty.handler.codec.http._
 import io.netty.util.CharsetUtil
 import io.netty.util.concurrent.{ImmediateEventExecutor, Promise, Future => NFuture}
 
-
-case class HttpClient(count: Int = 10, parallel: Int = 10) extends LogSupport {
-
-  import base.NettySugar.syntax._
-
-  def start(host: String = "127.0.0.1", port: Int = 8080): Unit = {
-
-    val workerGroup = new NioEventLoopGroup(parallel)
-
-    try {
-      val channels: Seq[NFuture[_]] = (1 to parallel).map(i => taskThread())
-      channels.foreach(_.await(10000))
-      log.info("Client finished successfully")
-    } finally {
-      workerGroup.shutdownGracefully()
-    }
-
-    def taskThread(): NFuture[_] = {
-      log.debug(s"Creating Bootstrap...")
-
-      val boot = new Bootstrap()
-      boot.group(workerGroup)
-        .channel(classOf[NioSocketChannel])
-        .handler(new ChannelInitializer[SocketChannel]() {
-          def initChannel(ch: SocketChannel) {
-            val p = ch.pipeline()
-            p.addLast(new HttpClientCodec())
-          }
-        })
-        .option[lang.Boolean](ChannelOption.SO_KEEPALIVE, true)
-
-      val client = new DefaultNonBlockingClient(boot)(host, port)
-
-      val lastResponse = (1 until count).foldLeft(client.get("/hello")) { case (responseFut, _) =>
-        responseFut
-          .map(response => println(response.content()))
-          .flatMap(_ => client.get("/hello"))
-      }
-      lastResponse.map(_ => client.connection.channel().closeFuture())
-    }
-  }
-}
-
-
-trait NonBlockingClient {
+trait HttpClient {
   type Request
   type Response
-  def request(request: Request): NFuture[Response]
+
+  def execute(request: Request): NFuture[Response]
+
   def connection: ChannelFuture
+
+  def get(uri: String): NFuture[FullHttpResponse]
+  def post(uri: String, content: Option[ByteBuf]): NFuture[FullHttpResponse]
 }
 
-class DefaultNonBlockingClient(private val bootstrap: Bootstrap)(host: String, port: Int) extends NonBlockingClient {
+class DefaultHttpClient(private val bootstrap: Bootstrap)(host: String, port: Int) extends HttpClient {
 
   type Request = HttpReq
   type Response = FullHttpResponse
@@ -88,7 +47,16 @@ class DefaultNonBlockingClient(private val bootstrap: Bootstrap)(host: String, p
   def get(uri: String): NFuture[FullHttpResponse] = {
     val request = new DefaultFullHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.GET, uri)
     HttpHeaders.setContentLength(request, 0)
-    this.request(HttpReq(Seq(request)))
+    this.execute(HttpReq(Seq(request)))
+  }
+
+  def post(uri: String, content: Option[ByteBuf]): NFuture[FullHttpResponse] = {
+    val request = content match {
+      case Some(c) => new DefaultFullHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.POST, uri, c)
+      case None => new DefaultFullHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.POST, uri)
+    }
+    HttpHeaders.setContentLength(request, content.map(_.readableBytes()).getOrElse(0).toLong)
+    this.execute(HttpReq(Seq(request)))
   }
 
   def connection: ChannelFuture = synchronized {
@@ -110,7 +78,11 @@ class DefaultNonBlockingClient(private val bootstrap: Bootstrap)(host: String, p
     pollNextRequest()
   }
 
-  def request(request: this.Request): NFuture[this.Response] = {
+  def execute(request: HttpRequest): NFuture[this.Response] = {
+    this.execute(HttpReq(Seq(request)))
+  }
+
+  def execute(request: this.Request): NFuture[this.Response] = {
     val result: Promise[this.Response] = ImmediateEventExecutor.INSTANCE.newPromise.asInstanceOf[Promise[this.Response]]
     requestsQueue.add(RequestHandler(request, result))
     pollNextRequest()
