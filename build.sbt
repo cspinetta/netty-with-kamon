@@ -31,9 +31,9 @@ scalacOptions ++= Seq(
   "-unchecked",
   "-Xlint",
   "-Yno-adapted-args",
-  "-Ywarn-dead-code",
+//  "-Ywarn-dead-code",
   "-Ywarn-numeric-widen",
-  "-Ywarn-value-discard",
+//  "-Ywarn-value-discard",
   "-Xfuture")
 
 fork in run := true

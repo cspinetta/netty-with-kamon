@@ -1,6 +1,7 @@
 package playground
 package server
 
+import base.LogSupport
 import io.netty.buffer.Unpooled
 import io.netty.channel.{ChannelHandlerContext, ChannelInboundHandlerAdapter}
 import io.netty.handler.codec.http.HttpHeaders.Names._
@@ -10,13 +11,14 @@ import io.netty.handler.codec.http.HttpVersion._
 import io.netty.handler.codec.http.{DefaultFullHttpResponse, HttpRequest}
 import io.netty.util.CharsetUtil
 
-class HttpServerHandler() extends ChannelInboundHandlerAdapter {
+class HttpServerHandler() extends ChannelInboundHandlerAdapter with LogSupport {
 
   import HttpServerHandler.CONTENT
 
   override def channelRead(ctx: ChannelHandlerContext, msg: AnyRef): Unit =
     msg match {
       case req: HttpRequest =>
+        log.debug(s"Request: $req")
         if (is100ContinueExpected(req)) {
           ctx.write(new DefaultFullHttpResponse(HTTP_1_1, CONTINUE))
         }
