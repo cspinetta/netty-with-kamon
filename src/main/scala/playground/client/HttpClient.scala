@@ -1,12 +1,15 @@
 package playground.client
 
+import java.lang
 import java.util.concurrent.ArrayBlockingQueue
 
 import base.LogSupport
 import io.netty.bootstrap.Bootstrap
 import io.netty.buffer.ByteBuf
 import io.netty.channel.socket.SocketChannel
-import io.netty.channel.{ChannelFuture, ChannelHandlerContext, ChannelInitializer, SimpleChannelInboundHandler}
+import io.netty.channel.socket.nio.NioSocketChannel
+import io.netty.channel._
+import io.netty.channel.nio.NioEventLoopGroup
 import io.netty.handler.codec.http._
 import io.netty.util.CharsetUtil
 import io.netty.util.concurrent.{ImmediateEventExecutor, Promise, Future => NFuture}
@@ -156,4 +159,16 @@ class DefaultHttpClient(private val bootstrap: Bootstrap)(host: String, port: In
   }
 
   case class HttpReq(content: Seq[AnyRef], keepAlive: Boolean = true)
+}
+
+object DefaultHttpClient {
+
+  def withNio(workerGroup: NioEventLoopGroup)(host: String, port: Int): DefaultHttpClient = {
+    val boot = new Bootstrap()
+    boot.group(workerGroup)
+      .channel(classOf[NioSocketChannel])
+      .option[lang.Boolean](ChannelOption.SO_KEEPALIVE, true)
+
+    new DefaultHttpClient(boot)(host, port)
+  }
 }
