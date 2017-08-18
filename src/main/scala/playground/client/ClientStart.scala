@@ -6,6 +6,6 @@ object ClientStart extends App with LogSupport {
 
   log.info("Starting client...")
 
-  HttpClient(count = 5, parallel = 2).start()
+  HttpClient(count = 100, parallel = 5).start()
 
 }

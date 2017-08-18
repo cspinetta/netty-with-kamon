@@ -58,5 +58,7 @@ object NettySugar {
       def map[B](f: Channel => B): NFuture[B] = FutureMonad.map(fut.asInstanceOf[NFuture[Unit]], (_: Unit) => f(fut.channel()))
       def flatMap[B](f: Channel => NFuture[B]): NFuture[B] = FutureMonad.flatMap(fut.asInstanceOf[NFuture[Unit]], (_: Unit) => f(fut.channel()))
     }
+
+//    implicit def futureToChannelFuture(f: NFuture[Void]): ChannelFuture = f.asInstanceOf[ChannelFuture]
   }
 }
