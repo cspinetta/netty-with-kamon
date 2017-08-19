@@ -25,7 +25,7 @@ case class ABSimulator(count: Int, parallel: Int) extends LogSupport {
     val workerGroup = new NioEventLoopGroup(parallel)
 
     try {
-      val futures: Seq[NFuture[_]] = (1 to parallel).map(i => taskThread(workerGroup)(host, port))
+      val futures: Seq[NFuture[_]] = (1 to parallel).map(_ => taskThread(workerGroup)(host, port))
       futures.foreach(_.await(100000))
       log.info("Client finished successfully")
     } finally {
@@ -44,7 +44,10 @@ case class ABSimulator(count: Int, parallel: Int) extends LogSupport {
           .map(response => println(response.content()))
           .flatMap(_ => randomRequest(client))
       }
-      lastResponse.map(_ => client.connection.channel().closeFuture())
+      lastResponse.flatMap(_ => {
+        log.debug(s"Task's finished successfully")
+        client.close()
+      })
     }
   }
 

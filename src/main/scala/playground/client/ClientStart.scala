@@ -15,4 +15,5 @@ object ClientStart extends App with ConfigSupport with LogSupport {
   ABSimulator(generatorConfig.count, generatorConfig.parallel)
     .start(generatorConfig.host, generatorConfig.port)
 
+  log.info("Client finished successfully")
 }

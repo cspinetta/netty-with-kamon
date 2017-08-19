@@ -21,12 +21,15 @@ trait HttpClient {
   def execute(request: Request): NFuture[Response]
 
   def connection: ChannelFuture
+  def close: NFuture[Unit]
 
   def get(uri: String): NFuture[FullHttpResponse]
   def post(uri: String, content: Option[ByteBuf]): NFuture[FullHttpResponse]
 }
 
-class DefaultHttpClient(private val bootstrap: Bootstrap)(host: String, port: Int) extends HttpClient {
+class DefaultHttpClient(private val bootstrap: Bootstrap)(host: String, port: Int) extends HttpClient with LogSupport {
+
+//  import base.NettySugar.syntax._
 
   type Request = HttpReq
   type Response = FullHttpResponse
@@ -70,9 +73,23 @@ class DefaultHttpClient(private val bootstrap: Bootstrap)(host: String, port: In
     }
   }
 
+  def close(): NFuture[Unit] = {
+    val promise: Promise[Unit] = ImmediateEventExecutor.INSTANCE.newPromise.asInstanceOf[Promise[Unit]]
+    requestsQueue.clear()
+    this.connectionChannel match {
+      case Some(cf) => cf.channel().close().addListener((_: ChannelFuture) => promise.setSuccess(()))
+      case None => promise.setSuccess(())
+    }
+    promise
+  }
+
   protected def connect(): ChannelFuture = {
+    log.debug(s"Establishing connection to $host:$port")
     val channel = _boot.connect(host, port)
-    channel.channel().closeFuture().addListener((_: ChannelFuture) => connectionChannel = None)
+    channel.channel().closeFuture().addListener((_: ChannelFuture) => {
+      log.debug(s"Connection's been closed.")
+      connectionChannel = None
+    })
     channel
   }
 
