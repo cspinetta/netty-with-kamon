@@ -2,6 +2,8 @@ package playground.client
 
 import base.{ConfigSupport, LogSupport}
 import io.netty.buffer.Unpooled
+import io.netty.channel.MultithreadEventLoopGroup
+import io.netty.channel.epoll.{Epoll, EpollEventLoopGroup}
 import io.netty.channel.nio.NioEventLoopGroup
 import io.netty.handler.codec.http._
 import io.netty.util.CharsetUtil
@@ -22,10 +24,19 @@ case class ABSimulator(count: Int, parallel: Int) extends LogSupport {
 
   def start(host: String, port: Int): Unit = {
 
-    val workerGroup = new NioEventLoopGroup(parallel)
+    val (workerGroup, clientBuilder) =
+      if (Epoll.isAvailable) {
+        log.info(s"Using Epoll Event Loop")
+        val el = new EpollEventLoopGroup(parallel)
+        (el, DefaultHttpClient.withEpoll(el) _)
+      } else {
+        log.info(s"Using Nio Event Loop")
+        val el = new NioEventLoopGroup(parallel)
+        (el, DefaultHttpClient.withNio(el) _)
+      }
 
     try {
-      val futures: Seq[NFuture[_]] = (1 to parallel).map(_ => taskThread(workerGroup)(host, port))
+      val futures: Seq[NFuture[_]] = (1 to parallel).map(_ => taskThread(workerGroup, clientBuilder)(host, port))
       futures.foreach(_.sync())
       log.info("All client have finished successfully")
     } finally {
@@ -33,9 +44,10 @@ case class ABSimulator(count: Int, parallel: Int) extends LogSupport {
     }
   }
 
-  def taskThread(workerGroup: NioEventLoopGroup)(host: String, port: Int): NFuture[_] = {
+  def taskThread(workerGroup: MultithreadEventLoopGroup, clientBuilder: (String, Int) => DefaultHttpClient)(host: String, port: Int): NFuture[_] = {
     log.debug(s"Starting task thread to perform $count requests to $host:$port ...")
-    val client = DefaultHttpClient.withNio(workerGroup)(host, port)
+
+    val client = clientBuilder(host, port)
 
     val clientSpan = Kamon.buildSpan("client-span").start()
     Kamon.withContext(Context.create(Span.ContextKey, clientSpan)) {

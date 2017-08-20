@@ -11,6 +11,7 @@ import io.netty.buffer.ByteBuf
 import io.netty.channel.socket.SocketChannel
 import io.netty.channel.socket.nio.NioSocketChannel
 import io.netty.channel._
+import io.netty.channel.epoll.{EpollEventLoopGroup, EpollSocketChannel}
 import io.netty.channel.nio.NioEventLoopGroup
 import io.netty.handler.codec.http._
 import io.netty.util.CharsetUtil
@@ -269,6 +270,15 @@ object DefaultHttpClient {
     val boot = new Bootstrap()
     boot.group(workerGroup)
       .channel(classOf[NioSocketChannel])
+      .option[lang.Boolean](ChannelOption.SO_KEEPALIVE, true)
+
+    new DefaultHttpClient(boot)(host, port)
+  }
+
+  def withEpoll(workerGroup: EpollEventLoopGroup)(host: String, port: Int): DefaultHttpClient = {
+    val boot = new Bootstrap()
+    boot.group(workerGroup)
+      .channel(classOf[EpollSocketChannel])
       .option[lang.Boolean](ChannelOption.SO_KEEPALIVE, true)
 
     new DefaultHttpClient(boot)(host, port)
