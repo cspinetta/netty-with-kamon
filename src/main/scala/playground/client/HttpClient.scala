@@ -73,13 +73,16 @@ class DefaultHttpClient(private val bootstrap: Bootstrap)(host: String, port: In
       .find(validStatusFrom => clientStatus.compareAndSet(validStatusFrom, ClientStatus.Busy))
       .foreach(statusFrom => {
         val task = taskQueue.poll()
-        if (task != null) task.process(statusFrom,
-          newStatus => {
-            val result = clientStatus.compareAndSet(ClientStatus.Busy, newStatus)
-            if (!result)
-              log.warn(s"Failed trying to change connection status from ${ClientStatus.Busy} to $newStatus. Current status: ${clientStatus.get()}. Some potential bug is happening?")
-            tryPollTask()
-          })
+        if (task != null) {
+          log.debug(s"Starting task: $task")
+          task.process(statusFrom,
+            newStatus => {
+              val result = clientStatus.compareAndSet(ClientStatus.Busy, newStatus)
+              if (!result)
+                log.warn(s"Failed trying to change connection status from ${ClientStatus.Busy} to $newStatus. Current status: ${clientStatus.get()}. Some potential bug is happening?")
+              tryPollTask()
+            })
+        }
       })
   }
 
@@ -166,8 +169,8 @@ class DefaultHttpClient(private val bootstrap: Bootstrap)(host: String, port: In
             res => request.promise.setSuccess(res.asInstanceOf[FullHttpResponse]),
             () => finishF(ClientStatus.Idle),
             _ => {
-              finishF(ClientStatus.Idle)
               close()
+              finishF(ClientStatus.Idle)
             }
           )
           responseHandler.subscribeHandler(arh)
@@ -214,10 +217,10 @@ class DefaultHttpClient(private val bootstrap: Bootstrap)(host: String, port: In
       }
     }
 
-    private def afterConnectionClose(finishF: (ClientStatus) => Unit) = {
-      finishF(ClientStatus.Disconnected)
+    private def afterConnectionClose(finishF: (ClientStatus) => Unit): Unit = {
       addTask(CancelRequestTask())
       closeHandler.promise.setSuccess(())
+      finishF(ClientStatus.Disconnected)
     }
   }
 
