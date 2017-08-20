@@ -176,7 +176,7 @@ class DefaultHttpClient(private val bootstrap: Bootstrap)(host: String, port: In
           responseHandler.subscribeHandler(arh)
           executeRequest(f.channel())(request.request)
         } else {
-          request.promise.cancel(false)
+          if (request.promise.isCancellable) request.promise.cancel(false)
           finishF(statusFrom)
         }
       })
@@ -196,7 +196,7 @@ class DefaultHttpClient(private val bootstrap: Bootstrap)(host: String, port: In
       drained.asScala.foreach {
         case RequestTask(reqHandler) =>
           countRequests += 1
-          reqHandler.promise.cancel(false)
+          if (reqHandler.promise.isCancellable) reqHandler.promise.cancel(false)
         case x: Task => taskQueue.add(x)
       }
       log.debug(s"Draining $countRequests enqueued requests from $totalTasks tasks due to connection has closed")
