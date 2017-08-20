@@ -136,7 +136,7 @@ class DefaultHttpClient(private val bootstrap: Bootstrap)(host: String, port: In
 
   def close(): NFuture[Unit] = {
     val promise: Promise[Unit] = ImmediateEventExecutor.INSTANCE.newPromise.asInstanceOf[Promise[Unit]]
-    val task = CloseTask(CloseHandler(promise))
+    val task = CloseConnectionTask(CloseHandler(promise))
     addTask(task)
     promise
   }
@@ -198,7 +198,7 @@ class DefaultHttpClient(private val bootstrap: Bootstrap)(host: String, port: In
     }
   }
 
-  case class CloseTask(closeHandler: CloseHandler) extends Task {
+  case class CloseConnectionTask(closeHandler: CloseHandler) extends Task {
     val priority: Int = 1
 
     override def statusFrom: Seq[ClientStatus] = Seq(ClientStatus.Idle, ClientStatus.Disconnected)
@@ -207,15 +207,18 @@ class DefaultHttpClient(private val bootstrap: Bootstrap)(host: String, port: In
                          finishF: ClientStatus => Unit): Unit = {
       connectionChannel match {
         case Some(cf) => cf.channel().close().addListener((_: ChannelFuture) => {
-          closeHandler.promise.setSuccess(())
-          finishF(ClientStatus.Disconnected)
+          afterConnectionClose(finishF)
         })
         case None =>
-          closeHandler.promise.setSuccess(())
-          finishF(ClientStatus.Disconnected)
+          afterConnectionClose(finishF)
       }
     }
 
+    private def afterConnectionClose(finishF: (ClientStatus) => Unit) = {
+      finishF(ClientStatus.Disconnected)
+      addTask(CancelRequestTask())
+      closeHandler.promise.setSuccess(())
+    }
   }
 
   trait ClientStatus
