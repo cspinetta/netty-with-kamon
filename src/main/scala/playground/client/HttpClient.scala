@@ -191,12 +191,15 @@ class DefaultHttpClient(private val bootstrap: Bootstrap)(host: String, port: In
     override def process(statusFrom: ClientStatus,
                          finishF: ClientStatus => Unit): Unit = {
       val drained = new util.ArrayList[Task]()
-      val countDraineds = taskQueue.drainTo(drained)
-      log.debug(s"Draining $countDraineds enqueued requests due to connection has closed")
+      val totalTasks = taskQueue.drainTo(drained)
+      var countRequests = 0
       drained.asScala.foreach {
-        case RequestTask(reqHandler) => reqHandler.promise.cancel(false)
-        case _ =>
+        case RequestTask(reqHandler) =>
+          countRequests += 1
+          reqHandler.promise.cancel(false)
+        case x: Task => taskQueue.add(x)
       }
+      log.debug(s"Draining $countRequests enqueued requests from $totalTasks tasks due to connection has closed")
       finishF(statusFrom)
     }
   }
