@@ -1,7 +1,9 @@
 package playground.client
 
-import java.lang
-import java.util.concurrent.ArrayBlockingQueue
+import java.util.Comparator
+import java.{lang, util}
+import java.util.concurrent.{ArrayBlockingQueue, PriorityBlockingQueue}
+import java.util.concurrent.atomic.AtomicReference
 
 import base.LogSupport
 import io.netty.bootstrap.Bootstrap
@@ -18,7 +20,7 @@ trait HttpClient {
   type Request
   type Response
 
-  def execute(request: Request): NFuture[Response]
+  def addRequest(request: Request): NFuture[Response]
 
   def connection: ChannelFuture
   def close: NFuture[Unit]
@@ -30,12 +32,23 @@ trait HttpClient {
 class DefaultHttpClient(private val bootstrap: Bootstrap)(host: String, port: Int) extends HttpClient with LogSupport {
 
 //  import base.NettySugar.syntax._
+  import scala.collection.JavaConverters._
 
   type Request = HttpReq
   type Response = FullHttpResponse
 
-  private val requestsQueue = new ArrayBlockingQueue[RequestHandler](20)
-  protected val responseHandler = new HttpClientResponseHandler[this.Response](_.asInstanceOf[FullHttpResponse], onResponseCompletedEvent)
+
+  private val clientStatus: AtomicReference[ClientStatus] = new AtomicReference(ClientStatus.Disconnected)
+  @volatile private var connectionChannel: Option[ChannelFuture] = None
+
+  private val taskQueue = new PriorityBlockingQueue[Task](20, (t1: Task, t2: Task) =>
+    if (t1.priority == t2.priority) 0
+    else if (t1.priority < t2.priority) -1
+    else 1)
+
+  private val activeRequest: AtomicReference[Option[RequestHandler]] = new AtomicReference(None)
+
+  protected val responseHandler = new HttpClientResponseHandler()
 
   private val _boot = bootstrap
     .handler(new ChannelInitializer[SocketChannel]() {
@@ -47,22 +60,26 @@ class DefaultHttpClient(private val bootstrap: Bootstrap)(host: String, port: In
       }
     })
 
-  @volatile private var connectionStatus: ConnectionStatus = ConnectionStatus.Disconnected
-  @volatile private var connectionChannel: Option[ChannelFuture] = None
-
-  def get(uri: String): NFuture[FullHttpResponse] = {
-    val request = new DefaultFullHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.GET, uri)
-    HttpHeaders.setContentLength(request, 0)
-    this.execute(HttpReq(Seq(request)))
+  def addTask(task: Task): Unit = {
+    taskQueue.add(task)
+    tryPollTask()
   }
 
-  def post(uri: String, content: Option[ByteBuf]): NFuture[FullHttpResponse] = {
-    val request = content match {
-      case Some(c) => new DefaultFullHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.POST, uri, c)
-      case None => new DefaultFullHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.POST, uri)
-    }
-    HttpHeaders.setContentLength(request, content.map(_.readableBytes()).getOrElse(0).toLong)
-    this.execute(HttpReq(Seq(request)))
+  def tryPollTask(): Unit = {
+
+    val validStatus = List(ClientStatus.Disconnected, ClientStatus.Idle)
+    validStatus
+      .find(validStatusFrom => clientStatus.compareAndSet(validStatusFrom, ClientStatus.Busy))
+      .foreach(statusFrom => {
+        val task = taskQueue.poll()
+        if (task != null) task.process(statusFrom,
+          newStatus => {
+            val result = clientStatus.compareAndSet(ClientStatus.Busy, newStatus)
+            if (!result)
+              log.warn(s"Failed trying to change connection status from ${ClientStatus.Busy} to $newStatus. Current status: ${clientStatus.get()}. Some potential bug is happening?")
+            tryPollTask()
+          })
+      })
   }
 
   def connection: ChannelFuture = synchronized {
@@ -73,82 +90,151 @@ class DefaultHttpClient(private val bootstrap: Bootstrap)(host: String, port: In
     }
   }
 
-  def close(): NFuture[Unit] = {
-    val promise: Promise[Unit] = ImmediateEventExecutor.INSTANCE.newPromise.asInstanceOf[Promise[Unit]]
-    requestsQueue.clear()
-    this.connectionChannel match {
-      case Some(cf) => cf.channel().close().addListener((_: ChannelFuture) => promise.setSuccess(()))
-      case None => promise.setSuccess(())
-    }
-    promise
-  }
-
   protected def connect(): ChannelFuture = {
     log.debug(s"Establishing connection to $host:$port")
     val channel = _boot.connect(host, port)
     channel.channel().closeFuture().addListener((_: ChannelFuture) => {
-      log.debug(s"Connection's been closed.")
+      log.debug(s"Connection has been closed.")
       connectionChannel = None
+      close()
     })
     channel
   }
 
-  protected def onResponseCompletedEvent(): Unit = {
-    connectionStatus = ConnectionStatus.Idle
-    pollNextRequest()
+  def get(uri: String): NFuture[FullHttpResponse] = {
+    val request = new DefaultFullHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.GET, uri)
+    HttpHeaders.setContentLength(request, 0)
+    this.addRequest(HttpReq(Seq(request)))
   }
 
-  def execute(request: HttpRequest): NFuture[this.Response] = {
-    this.execute(HttpReq(Seq(request)))
+  def post(uri: String, content: Option[ByteBuf]): NFuture[FullHttpResponse] = {
+    val request = content match {
+      case Some(c) => new DefaultFullHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.POST, uri, c)
+      case None => new DefaultFullHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.POST, uri)
+    }
+    HttpHeaders.setContentLength(request, content.map(_.readableBytes()).getOrElse(0).toLong)
+    this.addRequest(HttpReq(Seq(request)))
   }
 
-  def execute(request: this.Request): NFuture[this.Response] = {
+  def addRequest(request: HttpRequest): NFuture[this.Response] = {
+    this.addRequest(HttpReq(Seq(request)))
+  }
+
+  def addRequest(request: this.Request): NFuture[this.Response] = {
     val result: Promise[this.Response] = ImmediateEventExecutor.INSTANCE.newPromise.asInstanceOf[Promise[this.Response]]
-    requestsQueue.add(RequestHandler(request, result))
-    pollNextRequest()
+    val task = RequestTask(RequestHandler(request, result))
+    addTask(task)
     result
   }
 
-  protected def pollNextRequest(): Unit = {
-    connectionStatus match {
-      case ConnectionStatus.Disconnected | ConnectionStatus.Idle =>
-        val r = requestsQueue.poll()
-        if (r != null) {
-          responseHandler.subscribeHandler(r.promise)
-          executeRequest(r.request)
-        }
-      case _ =>
-    }
+  private def executeRequest(channel: Channel)(request: this.Request): Unit = {
+    log.debug(s"-----------------> Processing request: ${request.content.headOption}")
+    request.content.foreach(channel.write)
+    channel.flush()
   }
 
-  private def executeRequest(request: this.Request): Unit = {
-    connection.addListener((_: ChannelFuture) => {
-      val channel = connection.channel()
-      request.content.foreach(channel.write)
-      channel.flush()
-    })
+  def close(): NFuture[Unit] = {
+    val promise: Promise[Unit] = ImmediateEventExecutor.INSTANCE.newPromise.asInstanceOf[Promise[Unit]]
+    val task = CloseTask(CloseHandler(promise))
+    addTask(task)
+    promise
   }
 
   case class RequestHandler(request: Request, promise: Promise[Response])
+  case class CloseHandler(promise: Promise[Unit])
 
-  trait ConnectionStatus
-  object ConnectionStatus {
-    case object Disconnected extends ConnectionStatus
-    case object Idle extends ConnectionStatus
-    case object Busy extends ConnectionStatus
+  trait Task {
+    def priority: Int
+    def statusFrom: Seq[ClientStatus]
+
+    def process(statusFrom: ClientStatus,
+                finishF: ClientStatus => Unit): Unit
   }
 
-  class HttpClientResponseHandler[A](responseBuilder: HttpObject => A, responseCompletedEventHandler: () => Unit) extends SimpleChannelInboundHandler[HttpObject] with LogSupport {
+  case class RequestTask(request: RequestHandler) extends Task {
+    val priority: Int = 10
 
-    private var _promise: Option[Promise[A]] = None
-    def subscribeHandler(promise: Promise[A]): Unit = {
-      _promise = Some(promise)
+    override def statusFrom: Seq[ClientStatus] = Seq(ClientStatus.Idle, ClientStatus.Disconnected)
+
+    override def process(statusFrom: ClientStatus,
+                         finishF: ClientStatus => Unit): Unit = {
+      connection.addListener((f: ChannelFuture) => {
+        if (f.isSuccess) {
+          activeRequest.set(Some(request))
+          val arh = ActiveRequestHandler(
+            res => request.promise.setSuccess(res.asInstanceOf[FullHttpResponse]),
+            () => finishF(ClientStatus.Idle),
+            _ => {
+              finishF(ClientStatus.Idle)
+              close()
+            }
+          )
+          responseHandler.subscribeHandler(arh)
+          executeRequest(f.channel())(request.request)
+        } else {
+          request.promise.cancel(false)
+          finishF(statusFrom)
+        }
+      })
+    }
+  }
+
+  case class CancelRequestTask() extends Task {
+    val priority: Int = 5
+
+    override def statusFrom: Seq[ClientStatus] = Seq(ClientStatus.Idle, ClientStatus.Disconnected)
+
+    override def process(statusFrom: ClientStatus,
+                         finishF: ClientStatus => Unit): Unit = {
+      val drained = new util.ArrayList[Task]()
+      val countDraineds = taskQueue.drainTo(drained)
+      log.debug(s"Draining $countDraineds enqueued requests due to connection has closed")
+      drained.asScala.foreach {
+        case RequestTask(reqHandler) => reqHandler.promise.cancel(false)
+        case _ =>
+      }
+      finishF(statusFrom)
+    }
+  }
+
+  case class CloseTask(closeHandler: CloseHandler) extends Task {
+    val priority: Int = 1
+
+    override def statusFrom: Seq[ClientStatus] = Seq(ClientStatus.Idle, ClientStatus.Disconnected)
+
+    override def process(statusFrom: ClientStatus,
+                         finishF: ClientStatus => Unit): Unit = {
+      connectionChannel match {
+        case Some(cf) => cf.channel().close().addListener((_: ChannelFuture) => {
+          closeHandler.promise.setSuccess(())
+          finishF(ClientStatus.Disconnected)
+        })
+        case None =>
+          closeHandler.promise.setSuccess(())
+          finishF(ClientStatus.Disconnected)
+      }
     }
 
-    def onResponseArriveEvent(msg: HttpObject): Unit = {
-      _promise.foreach(_.setSuccess(responseBuilder(msg)))
-    }
-    def onResponseCompletedEvent(): Unit = responseCompletedEventHandler()
+  }
+
+  trait ClientStatus
+  object ClientStatus {
+    case object Disconnected extends ClientStatus
+    case object Idle extends ClientStatus
+    case object Busy extends ClientStatus
+  }
+
+  case class ActiveRequestHandler(result: HttpObject => Unit, success: () => Unit, fail: Throwable => Unit)
+
+  class HttpClientResponseHandler() extends SimpleChannelInboundHandler[HttpObject] with LogSupport {
+
+    @volatile private var activeRequestHandler: Option[ActiveRequestHandler] = None
+
+    def subscribeHandler(handler: ActiveRequestHandler): Unit = activeRequestHandler = Some(handler)
+
+    def onResponseArriveEvent(msg: HttpObject): Unit = activeRequestHandler.foreach(_.result(msg))
+
+    def onResponseCompletedEvent(): Unit = activeRequestHandler.foreach(_.success())
 
     override def channelRead0(ctx: ChannelHandlerContext, msg: HttpObject): Unit = {
 
@@ -170,8 +256,7 @@ class DefaultHttpClient(private val bootstrap: Bootstrap)(host: String, port: In
     }
 
     override def exceptionCaught(ctx: ChannelHandlerContext, cause: Throwable) {
-      cause.printStackTrace()
-      ctx.close
+      activeRequestHandler.foreach(_.fail(cause))
     }
   }
 

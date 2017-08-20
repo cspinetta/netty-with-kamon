@@ -6,7 +6,7 @@ import io.netty.channel.{Channel, ChannelFuture}
 import io.netty.util.concurrent.{ImmediateEventExecutor, Promise, Future => NFuture}
 
 
-// from: https://github.com/novarto-oss/netty-future-monad
+// some things took from: https://github.com/novarto-oss/netty-future-monad
 object NettySugar {
 
   object FutureUtil {

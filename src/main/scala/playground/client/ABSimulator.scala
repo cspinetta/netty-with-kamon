@@ -26,8 +26,8 @@ case class ABSimulator(count: Int, parallel: Int) extends LogSupport {
 
     try {
       val futures: Seq[NFuture[_]] = (1 to parallel).map(_ => taskThread(workerGroup)(host, port))
-      futures.foreach(_.await(100000))
-      log.info("Client finished successfully")
+      futures.foreach(_.sync())
+      log.info("All client have finished successfully")
     } finally {
       workerGroup.shutdownGracefully()
     }
@@ -41,10 +41,11 @@ case class ABSimulator(count: Int, parallel: Int) extends LogSupport {
     Kamon.withContext(Context.create(Span.ContextKey, clientSpan)) {
       val lastResponse = (1 until count).foldLeft(randomRequest(client)) { case (responseFut, _) =>
         responseFut
-          .map(response => println(response.content()))
+          .map(response => log.debug(s"-----------------> Response: \n${response.content().toString(CharsetUtil.UTF_8)}"))
           .flatMap(_ => randomRequest(client))
       }
-      lastResponse.flatMap(_ => {
+      lastResponse.flatMap(response => {
+        log.debug(s"-----------------> Response (LAST!): \n${response.content().toString(CharsetUtil.UTF_8)}")
         log.debug(s"Task's finished successfully")
         client.close()
       })
@@ -53,9 +54,12 @@ case class ABSimulator(count: Int, parallel: Int) extends LogSupport {
 
   def randomRequest(client: HttpClient): NFuture[FullHttpResponse] = {
     ABSimulator.possibleRequests(random.nextInt(ABSimulator.possibleRequests.size)) match {
-      case GetRequestBuilder(uri) => client.get(uri)
-      case PostRequestBuilder(uri, content) => client.post(uri, content.map( c =>
-        Unpooled.copiedBuffer(c, CharsetUtil.UTF_8)))
+      case GetRequestBuilder(uri) =>
+        log.debug(s"-----------------> Request: GET:$uri")
+        client.get(uri)
+      case PostRequestBuilder(uri, content) =>
+        log.debug(s"-----------------> Request: POST:$uri")
+        client.post(uri, content.map( c => Unpooled.copiedBuffer(c, CharsetUtil.UTF_8)))
     }
   }
 
