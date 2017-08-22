@@ -44,15 +44,15 @@ case class ABSimulator(count: Int, parallel: Int) extends LogSupport with Config
     }
   }
 
-  def taskThread(workerGroup: MultithreadEventLoopGroup, clientBuilder: (String, Int) => KamonContext => DefaultHttpClient)(host: String, port: Int): NFuture[_] = {
+  def taskThread(workerGroup: MultithreadEventLoopGroup, clientBuilder: (String, Int) => DefaultHttpClient)(host: String, port: Int): NFuture[_] = {
     log.debug(s"Starting task thread to perform $count requests to $host:$port ...")
 
-    val kamonContext = if (config.requestGenerator.kamonEnabled) {
+    implicit val kamonContext = if (config.requestGenerator.kamonEnabled) {
       val clientSpan = Kamon.buildSpan("client-span").start()
       KamonContext.create(Span.ContextKey, clientSpan)
     } else KamonContext.Empty
 
-    val client = clientBuilder(host, port)(kamonContext)
+    val client = clientBuilder(host, port)
 
     val lastResponse = (1 until count).foldLeft(randomRequest(client)) { case (responseFut, _) =>
       responseFut
@@ -66,16 +66,17 @@ case class ABSimulator(count: Int, parallel: Int) extends LogSupport with Config
     })
   }
 
-  def randomRequest(client: HttpClient): NFuture[FullHttpResponse] = {
-    ABSimulator.possibleRequests(random.nextInt(ABSimulator.possibleRequests.size)) match {
-      case GetRequestBuilder(uri) =>
-        log.debug(s"-----------------> Request: GET:$uri")
-        client.get(uri)
-      case PostRequestBuilder(uri, content) =>
-        log.debug(s"-----------------> Request: POST:$uri")
-        client.post(uri, content.map( c => Unpooled.copiedBuffer(c, CharsetUtil.UTF_8)))
+  def randomRequest(client: HttpClient)(implicit kamonContext: KamonContext): NFuture[FullHttpResponse] =
+    Kamon.withContext(kamonContext) {
+      ABSimulator.possibleRequests(random.nextInt(ABSimulator.possibleRequests.size)) match {
+        case GetRequestBuilder(uri) =>
+          log.debug(s"-----------------> Request: GET:$uri")
+          client.get(uri)
+        case PostRequestBuilder(uri, content) =>
+          log.debug(s"-----------------> Request: POST:$uri")
+          client.post(uri, content.map( c => Unpooled.copiedBuffer(c, CharsetUtil.UTF_8)))
+      }
     }
-  }
 
 }
 
