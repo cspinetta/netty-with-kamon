@@ -16,6 +16,9 @@ import io.netty.channel.nio.NioEventLoopGroup
 import io.netty.handler.codec.http._
 import io.netty.util.CharsetUtil
 import io.netty.util.concurrent.{ImmediateEventExecutor, Promise, Future => NFuture}
+import kamon.Kamon
+import kamon.context.{Context => KamonContext}
+import kamon.netty.instrumentation.ChannelContextAware
 
 trait HttpClient {
   type Request
@@ -30,7 +33,7 @@ trait HttpClient {
   def post(uri: String, content: Option[ByteBuf]): NFuture[FullHttpResponse]
 }
 
-class DefaultHttpClient(private val bootstrap: Bootstrap)(host: String, port: Int) extends HttpClient with LogSupport {
+class DefaultHttpClient(private val bootstrap: Bootstrap)(host: String, port: Int)(kamonContext: KamonContext = KamonContext.Empty) extends HttpClient with LogSupport {
 
 //  import base.NettySugar.syntax._
   import scala.collection.JavaConverters._
@@ -95,14 +98,18 @@ class DefaultHttpClient(private val bootstrap: Bootstrap)(host: String, port: In
   }
 
   protected def connect(): ChannelFuture = {
-    log.debug(s"Establishing connection to $host:$port")
-    val channel = _boot.connect(host, port)
-    channel.channel().closeFuture().addListener((_: ChannelFuture) => {
-      log.debug(s"Connection has been closed.")
-      connectionChannel = None
-      close()
-    })
-    channel
+    Kamon.withContext(kamonContext) {
+      log.debug(s"Establishing connection to $host:$port")
+      val channel = _boot.connect(host, port)
+      channel.channel().closeFuture().addListener((_: ChannelFuture) => {
+        log.debug(s"Connection has been closed.")
+        connectionChannel = None
+        close()
+      })
+      // need to force initialization
+      channel.channel().asInstanceOf[ChannelContextAware].context
+      channel
+    }
   }
 
   def get(uri: String): NFuture[FullHttpResponse] = {
@@ -275,21 +282,21 @@ class DefaultHttpClient(private val bootstrap: Bootstrap)(host: String, port: In
 
 object DefaultHttpClient {
 
-  def withNio(workerGroup: NioEventLoopGroup)(host: String, port: Int): DefaultHttpClient = {
+  def withNio(workerGroup: NioEventLoopGroup)(host: String, port: Int)(kamonContext: KamonContext): DefaultHttpClient = {
     val boot = new Bootstrap()
     boot.group(workerGroup)
       .channel(classOf[NioSocketChannel])
       .option[lang.Boolean](ChannelOption.SO_KEEPALIVE, true)
 
-    new DefaultHttpClient(boot)(host, port)
+    new DefaultHttpClient(boot)(host, port)(kamonContext)
   }
 
-  def withEpoll(workerGroup: EpollEventLoopGroup)(host: String, port: Int): DefaultHttpClient = {
+  def withEpoll(workerGroup: EpollEventLoopGroup)(host: String, port: Int)(kamonContext: KamonContext): DefaultHttpClient = {
     val boot = new Bootstrap()
     boot.group(workerGroup)
       .channel(classOf[EpollSocketChannel])
       .option[lang.Boolean](ChannelOption.SO_KEEPALIVE, true)
 
-    new DefaultHttpClient(boot)(host, port)
+    new DefaultHttpClient(boot)(host, port)(kamonContext)
   }
 }

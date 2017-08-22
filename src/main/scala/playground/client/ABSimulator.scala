@@ -9,13 +9,13 @@ import io.netty.handler.codec.http._
 import io.netty.util.CharsetUtil
 import io.netty.util.concurrent.{Future => NFuture}
 import kamon.Kamon
-import kamon.context.Context
+import kamon.context.{Context => KamonContext}
 import kamon.trace.Span
 
 import scala.util.Random
 
 
-case class ABSimulator(count: Int, parallel: Int) extends LogSupport {
+case class ABSimulator(count: Int, parallel: Int) extends LogSupport with ConfigSupport {
 
   import base.NettySugar.syntax._
   import playground.client.ABSimulator._
@@ -44,24 +44,26 @@ case class ABSimulator(count: Int, parallel: Int) extends LogSupport {
     }
   }
 
-  def taskThread(workerGroup: MultithreadEventLoopGroup, clientBuilder: (String, Int) => DefaultHttpClient)(host: String, port: Int): NFuture[_] = {
+  def taskThread(workerGroup: MultithreadEventLoopGroup, clientBuilder: (String, Int) => KamonContext => DefaultHttpClient)(host: String, port: Int): NFuture[_] = {
     log.debug(s"Starting task thread to perform $count requests to $host:$port ...")
 
-    val client = clientBuilder(host, port)
+    val kamonContext = if (config.requestGenerator.kamonEnabled) {
+      val clientSpan = Kamon.buildSpan("client-span").start()
+      KamonContext.create(Span.ContextKey, clientSpan)
+    } else KamonContext.Empty
 
-    val clientSpan = Kamon.buildSpan("client-span").start()
-    Kamon.withContext(Context.create(Span.ContextKey, clientSpan)) {
-      val lastResponse = (1 until count).foldLeft(randomRequest(client)) { case (responseFut, _) =>
-        responseFut
-          .map(response => log.debug(s"-----------------> Response: \n${response.content().toString(CharsetUtil.UTF_8)}"))
-          .flatMap(_ => randomRequest(client))
-      }
-      lastResponse.flatMap(response => {
-        log.debug(s"-----------------> Response (LAST!): \n${response.content().toString(CharsetUtil.UTF_8)}")
-        log.debug(s"Task's finished successfully")
-        client.close()
-      })
+    val client = clientBuilder(host, port)(kamonContext)
+
+    val lastResponse = (1 until count).foldLeft(randomRequest(client)) { case (responseFut, _) =>
+      responseFut
+        .map(response => log.debug(s"-----------------> Response: \n${response.content().toString(CharsetUtil.UTF_8)}"))
+        .flatMap(_ => randomRequest(client))
     }
+    lastResponse.flatMap(response => {
+      log.debug(s"-----------------> Response (LAST!): \n${response.content().toString(CharsetUtil.UTF_8)}")
+      log.debug(s"Task's finished successfully")
+      client.close()
+    })
   }
 
   def randomRequest(client: HttpClient): NFuture[FullHttpResponse] = {
